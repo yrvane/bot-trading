@@ -33,7 +33,7 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 TRADES_FILE = os.path.join(BASE_DIR, "data", "bot_trades.csv")
 os.makedirs(os.path.dirname(TRADES_FILE), exist_ok=True)
 
-# Positions ouvertes en mémoire
+# Positions ouvertes
 open_positions = {}
 last_signal_state = {}
 
@@ -57,7 +57,6 @@ def save_trade(trade):
     df.to_csv(TRADES_FILE, index=False)
 
 def update_trade_exit(symbol, exit_price, pnl):
-    """Met à jour un trade avec le prix de sortie et le PnL"""
     trades = load_trades()
     for t in trades:
         if t.get('symbol') == symbol and t.get('status') == 'open':
@@ -92,17 +91,16 @@ manager = ConnectionManager()
 
 # ==================== BOT AUTO-TRADING ====================
 async def check_and_execute_trades(symbol):
-    """Vérifie les signaux et exécute les trades automatiquement"""
     global open_positions, last_signal_state
     
-    # 1. Vérifier si déjà en position
+    # Déjà en position ?
     if symbol in open_positions:
         position = open_positions[symbol]
         current_price = get_current_price(symbol) or get_current_price_yfinance(symbol)
         
         if current_price:
-            pnl = 0
             exit_price = None
+            pnl = 0
             reason = None
             
             if position['type'] == 'LONG':
@@ -114,7 +112,7 @@ async def check_and_execute_trades(symbol):
                     exit_price = position['tp']
                     pnl = (exit_price - position['entry_price']) / position['entry_price'] * 100
                     reason = "TP"
-            else:  # SHORT
+            else:
                 if current_price >= position['sl']:
                     exit_price = position['sl']
                     pnl = (position['entry_price'] - exit_price) / position['entry_price'] * 100
@@ -136,13 +134,12 @@ async def check_and_execute_trades(symbol):
                 })
         return
     
-    # 2. Pas de position → vérifier les signaux
-    df = get_historical_data_yfinance(symbol, period="2d", interval="1h")
+    # Recherche de signal
+    df = get_historical_data_yfinance(symbol, period="60d", interval="1h")
     if df is not None and len(df) > 10:
         df = calculate_vwap(df)
         signal, reason = detect_signal(df)
         
-        # Éviter les signaux en double
         last_signal = last_signal_state.get(symbol)
         
         if signal and signal != last_signal:
@@ -151,7 +148,6 @@ async def check_and_execute_trades(symbol):
             atr = df['ATR'].iloc[-1] if 'ATR' in df.columns and not pd.isna(df['ATR'].iloc[-1]) else 10
             sl, tp = calculate_sl_tp(current_price, signal, atr)
             
-            # Ouvrir la position
             trade = {
                 'date': datetime.now(),
                 'symbol': symbol,
@@ -185,14 +181,33 @@ async def get_price(symbol: str):
     return {"symbol": symbol, "price": price, "timestamp": datetime.now().isoformat()}
 
 @app.get("/api/history/{symbol}")
-async def get_history(symbol: str, bars: int = 300, interval: str = "1h"):
-    period_map = {"5m": "5d", "15m": "10d", "1h": "60d", "4h": "60d", "1d": "180d"}
-    period = period_map.get(interval, "60d")
-    df = get_historical_data_yfinance(symbol, period=period, interval=interval)
-    if df is None:
-        return {"error": "No data"}
+async def get_history(symbol: str, bars: int = 300, interval: str = "H1"):
+    print(f"🔔 [DEBUG] Requête reçue: symbol={symbol}, bars={bars}, interval={interval}")
+    
+    # Mapping des intervalles
+    interval_map = {
+        "M5": "5m",
+        "M15": "15m",
+        "H1": "1h",
+        "H4": "4h",
+        "D1": "1d"
+    }
+    
+    yf_interval = interval_map.get(interval, "1h")
+    yf_period = "60d" if yf_interval in ["1h", "4h"] else ("7d" if yf_interval == "15m" else "3d")
+    
+    print(f"🔄 Mapping: {interval} -> yfinance interval={yf_interval}, period={yf_period}")
+    
+    df = get_historical_data_yfinance(symbol, period=yf_period, interval=yf_interval)
+    
+    if df is None or df.empty:
+        print(f"❌ Aucune donnée pour {symbol} avec interval {yf_interval}")
+        return {"error": f"No data for {symbol}"}
+    
+    print(f"✅ {len(df)} bougies chargées")
     df = calculate_vwap(df)
     df = df.tail(bars)
+    
     return {
         "dates": df.index.strftime('%Y-%m-%d %H:%M:%S').tolist(),
         "open": df['Open'].tolist(),
@@ -200,15 +215,17 @@ async def get_history(symbol: str, bars: int = 300, interval: str = "1h"):
         "low": df['Low'].tolist(),
         "close": df['Close'].tolist(),
         "vwap": df['VWAP'].tolist(),
+        "vwap_plus_1": df['VWAP_plus_1'].tolist(),
+        "vwap_minus_1": df['VWAP_minus_1'].tolist(),
     }
-
-@app.get("/api/trades")
-async def get_trades():
-    return load_trades()
 
 @app.get("/api/positions")
 async def get_positions():
     return list(open_positions.values())
+
+@app.get("/api/trades")
+async def get_trades():
+    return load_trades()
 
 # ==================== WEBSOCKET ====================
 @app.websocket("/ws/{symbol}")
@@ -216,7 +233,6 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
     await manager.connect(websocket)
     try:
         while True:
-            # Prix en direct
             price = get_current_price(symbol) or get_current_price_yfinance(symbol)
             if price:
                 await websocket.send_json({
@@ -225,10 +241,8 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
                     "timestamp": datetime.now().isoformat()
                 })
             
-            # Exécution auto-trading
             await check_and_execute_trades(symbol)
             
-            # Envoyer les positions ouvertes si besoin
             if symbol in open_positions:
                 await websocket.send_json({
                     "type": "position_update",
@@ -250,6 +264,5 @@ if __name__ == "__main__":
         print("✅ Navigateur ouvert sur http://127.0.0.1:8000")
     
     print("🚀 Bot Auto-Trading démarré...")
-    print("📊 Le bot ouvre et ferme les positions automatiquement")
     threading.Thread(target=open_browser, daemon=True).start()
     uvicorn.run(app, host="127.0.0.1", port=8000)

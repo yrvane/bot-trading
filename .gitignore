@@ -9,8 +9,8 @@ trading_bot_env/
 dist/
 build/
 
-# Données locales (contenant les trades)
-data/*.csv
+# Données (CSV volumineux)
+*.csv
 !data/.gitkeep
 
 # Fichiers sensibles
@@ -21,16 +21,11 @@ data/*.csv
 .vscode/
 .idea/
 *.swp
-*.swo
 
 # OS
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# MT5 (ne pas versionner)
-*.exe
-*.dll
 
 # Fichiers temporaires
 *.tmp
