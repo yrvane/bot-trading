@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+venv/
+trading_bot_env/
+*.egg-info/
+dist/
+build/
+
+# Données locales (contenant les trades)
+data/*.csv
+!data/.gitkeep
+
+# Fichiers sensibles
+.env
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# MT5 (ne pas versionner)
+*.exe
+*.dll
+
+# Fichiers temporaires
+*.tmp
+*.bak

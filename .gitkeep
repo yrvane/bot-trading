@@ -1,0 +1,2 @@
+# Depuis la racine du projet
+echo. > data\.gitkeep
