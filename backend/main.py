@@ -16,8 +16,8 @@ import time
 from data_fetcher    import get_historical_data_yfinance, get_current_price_yfinance
 from strategies      import calculate_vwap, detect_signal, calculate_sl_tp
 from trade_analyzer  import load_trades as analyzer_load, analyze, suggest_adjustments, load_config, save_config
-from news_sentiment  import get_sentiment, sentiment_allows_trade
-from telegram_alerts import (alert_new_trade, alert_trade_closed,
+from News_sentiment  import get_sentiment, sentiment_allows_trade
+from Telegram_alerts import (alert_new_trade, alert_trade_closed,
                               alert_signal_blocked, alert_config_updated,
                               alert_bot_started)
 
