@@ -6,6 +6,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+import json
 import pandas as pd
 import os
 from datetime import datetime
@@ -16,10 +17,10 @@ import time
 from data_fetcher    import get_historical_data_yfinance, get_current_price_yfinance
 from strategies      import calculate_vwap, detect_signal, calculate_sl_tp
 from trade_analyzer  import load_trades as analyzer_load, analyze, suggest_adjustments, load_config, save_config
-from News_sentiment  import get_sentiment, sentiment_allows_trade
+from News_sentiment  import get_sentiment, get_news, sentiment_allows_trade
 from Telegram_alerts import (alert_new_trade, alert_trade_closed,
                               alert_signal_blocked, alert_config_updated,
-                              alert_bot_started)
+                              alert_daily_summary, alert_bot_started)
 
 app = FastAPI()
 
@@ -35,6 +36,10 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 TRADES_FILE = os.path.join(BASE_DIR, "data", "bot_trades.csv")
 os.makedirs(os.path.dirname(TRADES_FILE), exist_ok=True)
+
+INITIAL_PORTFOLIO = 50000.0
+DAILY_SUMMARY_TIME_UTC = os.getenv("DAILY_SUMMARY_TIME_UTC", "21:05")
+DAILY_SUMMARY_STATE_FILE = os.path.join(BASE_DIR, "data", "daily_summary_state.json")
 
 open_positions    = {}
 last_signal_state = {}
@@ -92,6 +97,162 @@ def run_auto_critique():
             alert_config_updated(reasons, new_cfg)
     except Exception as e:
         print(f"⚠️  Auto-critique error : {e}")
+
+
+def load_daily_summary_state() -> dict:
+    try:
+        with open(DAILY_SUMMARY_STATE_FILE, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except Exception:
+        return {"last_sent_date": None}
+
+
+def save_daily_summary_state(state: dict):
+    os.makedirs(os.path.dirname(DAILY_SUMMARY_STATE_FILE), exist_ok=True)
+    with open(DAILY_SUMMARY_STATE_FILE, "w", encoding="utf-8") as file:
+        json.dump(state, file, indent=2)
+
+
+def build_daily_summary() -> dict:
+    today_utc = datetime.utcnow().date()
+    trades = load_trades()
+    today_trades = []
+
+    for trade in trades:
+        trade_date = pd.to_datetime(trade.get("date"), errors="coerce")
+        if pd.isna(trade_date) or trade_date.date() != today_utc:
+            continue
+        today_trades.append(trade)
+
+    closed_today = [trade for trade in today_trades if trade.get("status") == "closed"]
+    open_today = [trade for trade in today_trades if trade.get("status") == "open"]
+    df_today = pd.DataFrame(closed_today)
+
+    if closed_today:
+        analysis = analyze(df_today)
+        _, reasons = suggest_adjustments(analysis, strategy_config)
+    else:
+        analysis = {}
+        reasons = ["Aucun trade fermé aujourd'hui — attendre plus de données avant d'ajuster."]
+
+    if today_trades:
+        df_trades = pd.DataFrame(today_trades)
+        symbol_perf = df_trades.groupby("symbol")["pnl"].sum().sort_values(ascending=False)
+        top_symbol = str(symbol_perf.index[0]) if not symbol_perf.empty else "—"
+    else:
+        top_symbol = "—"
+
+    total_pnl = float(df_today["pnl"].sum()) if not df_today.empty else 0.0
+    total_pnl_pct = total_pnl
+
+    return {
+        "date_label": today_utc.strftime("%d/%m/%Y"),
+        "closed_trades": len(closed_today),
+        "open_trades": len(open_today),
+        "wins": analysis.get("wins", 0),
+        "losses": analysis.get("losses", 0),
+        "win_rate": analysis.get("win_rate", 0.0),
+        "profit_factor": analysis.get("profit_factor", 0),
+        "avg_win": analysis.get("avg_win", 0),
+        "avg_loss": analysis.get("avg_loss", 0),
+        "max_streak": analysis.get("max_streak", 0),
+        "best_hour": f"{analysis['best_hour']}h" if analysis.get("best_hour") is not None else "—",
+        "worst_hour": f"{analysis['worst_hour']}h" if analysis.get("worst_hour") is not None else "—",
+        "top_symbol": top_symbol,
+        "total_pnl_pct": total_pnl_pct,
+        "improvements": reasons,
+    }
+
+
+def should_send_daily_summary(now_utc: datetime | None = None) -> bool:
+    now_utc = now_utc or datetime.utcnow()
+    try:
+        target_hour, target_minute = [int(part) for part in DAILY_SUMMARY_TIME_UTC.split(":", 1)]
+    except ValueError:
+        target_hour, target_minute = 21, 5
+
+    state = load_daily_summary_state()
+    last_sent_date = state.get("last_sent_date")
+
+    if last_sent_date == now_utc.date().isoformat():
+        return False
+
+    if now_utc.hour > target_hour:
+        return True
+    if now_utc.hour == target_hour and now_utc.minute >= target_minute:
+        return True
+    return False
+
+
+def daily_summary_worker():
+    while True:
+        try:
+            if should_send_daily_summary():
+                summary = build_daily_summary()
+                if alert_daily_summary(summary):
+                    save_daily_summary_state({"last_sent_date": datetime.utcnow().date().isoformat()})
+        except Exception as e:
+            print(f"⚠️  Daily summary error : {e}")
+        time.sleep(60)
+
+
+def build_portfolio_summary(initial_capital: float = INITIAL_PORTFOLIO) -> dict:
+    trades = load_trades()
+    closed_trades = []
+
+    for trade in trades:
+        if trade.get("status") != "closed":
+            continue
+
+        trade_date = pd.to_datetime(trade.get("date"), errors="coerce")
+        if pd.isna(trade_date):
+            continue
+
+        try:
+            pnl = float(trade.get("pnl", 0) or 0)
+        except (TypeError, ValueError):
+            pnl = 0.0
+
+        closed_trades.append((trade_date.to_pydatetime(), trade, pnl))
+
+    closed_trades.sort(key=lambda item: item[0])
+
+    equity = float(initial_capital)
+    wins = 0
+    equity_curve = [{"time": datetime.now().isoformat(), "value": round(equity, 2)}]
+    latest_updates = []
+
+    for trade_date, trade, pnl in closed_trades:
+        equity *= 1 + (pnl / 100.0)
+        if pnl > 0:
+            wins += 1
+
+        equity_curve.append({
+            "time": trade_date.isoformat(),
+            "value": round(equity, 2),
+        })
+        latest_updates.append({
+            "date": trade_date.isoformat(),
+            "symbol": trade.get("symbol", ""),
+            "type": trade.get("type", ""),
+            "pnl": round(pnl, 2),
+            "equity": round(equity, 2),
+            "reason": trade.get("status", "closed"),
+        })
+
+    closed_count = len(closed_trades)
+    total_return_pct = ((equity / initial_capital) - 1) * 100 if initial_capital else 0
+
+    return {
+        "initial_capital": round(initial_capital, 2),
+        "current_capital": round(equity, 2),
+        "total_return_pct": round(total_return_pct, 2),
+        "closed_trades": closed_count,
+        "win_rate": round((wins / closed_count) * 100, 2) if closed_count else 0.0,
+        "equity_curve": equity_curve,
+        "trade_updates": latest_updates[-25:][::-1],
+        "generated_at": datetime.now().isoformat(),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -283,6 +444,19 @@ async def get_positions():
 async def get_sentiment_route(symbol: str):
     return get_sentiment(symbol)
 
+@app.get("/api/news/{symbol}")
+async def get_news_route(symbol: str, limit: int = 8):
+    return {
+        "symbol": symbol,
+        "sentiment": get_sentiment(symbol),
+        "articles": get_news(symbol, max_articles=limit),
+        "generated_at": datetime.now().isoformat(),
+    }
+
+@app.get("/api/portfolio")
+async def get_portfolio_summary():
+    return build_portfolio_summary()
+
 @app.get("/api/config")
 async def get_config():
     return strategy_config
@@ -337,5 +511,6 @@ if __name__ == "__main__":
 
     print("🚀 Bot démarré — VWAP + RSI/EMA/Volume + Auto-critique + Sentiment + Telegram")
     alert_bot_started()
+    threading.Thread(target=daily_summary_worker, daemon=True).start()
     threading.Thread(target=open_browser, daemon=True).start()
     uvicorn.run(app, host="127.0.0.1", port=8000)

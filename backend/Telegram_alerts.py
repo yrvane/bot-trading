@@ -169,6 +169,35 @@ def alert_config_updated(reasons: list, config: dict) -> bool:
     return _send(text)
 
 
+def alert_daily_summary(summary: dict) -> bool:
+    """Envoie un résumé quotidien du bot avec les axes d'amélioration."""
+    improvements = summary.get("improvements", [])
+    improvement_text = "\n".join(f"  • {item}" for item in improvements[:5]) or "  • Aucun axe prioritaire identifié"
+
+    top_symbol = summary.get("top_symbol", "—")
+    best_hour = summary.get("best_hour", "—")
+    worst_hour = summary.get("worst_hour", "—")
+    pnl = summary.get("total_pnl_pct", 0)
+    pnl_str = f"{pnl:+.2f}%"
+
+    text = (
+        f"📅 <b>RÉSUMÉ QUOTIDIEN — {summary.get('date_label', 'Aujourd\'hui')}</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📈 Trades fermés : <b>{summary.get('closed_trades', 0)}</b>\n"
+        f"🟡 Trades ouverts : <b>{summary.get('open_trades', 0)}</b>\n"
+        f"✅ Win rate       : <b>{summary.get('win_rate', 0):.1f}%</b>\n"
+        f"💹 PnL du jour    : <b>{pnl_str}</b>\n"
+        f"⚖️  Profit factor  : <b>{summary.get('profit_factor', '—')}</b>\n"
+        f"🧠 Pire série     : <b>{summary.get('max_streak', 0)}</b> pertes\n"
+        f"🏷️  Meilleur symbole : <b>{top_symbol}</b>\n"
+        f"⏱️  Meilleure heure   : <b>{best_hour}</b>\n"
+        f"⏱️  Pire heure        : <b>{worst_hour}</b>\n\n"
+        f"🛠️ <b>Axes d'amélioration</b>\n"
+        f"{improvement_text}"
+    )
+    return _send(text)
+
+
 def alert_bot_started() -> bool:
     """Message de démarrage du bot."""
     now  = datetime.now().strftime("%d/%m/%Y %H:%M")
