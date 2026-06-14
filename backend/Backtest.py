@@ -18,13 +18,16 @@ from datetime import datetime
 
 # ── Import de tes modules existants ──────────────────────────────────────────
 try:
-    from data_fetcher import get_historical_data_yfinance
-    from strategies import calculate_vwap, detect_signal, calculate_sl_tp
+    from data_fetcher import get_historical_data_yfinance, get_macro_ema
+    from strategies import calculate_vwap, calculate_idr, detect_signal, calculate_sl_tp
     print("✅ Modules importés depuis ton projet")
 except ImportError as e:
     print(f"⚠️  Impossible d'importer les modules ({e})")
     print("   Lance ce script depuis le dossier de ton projet.")
     sys.exit(1)
+
+# Intervalles intraday qui bénéficient du filtre macro 1h
+INTRADAY_INTERVALS = {"1m", "2m", "5m", "15m", "30m"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -32,7 +35,8 @@ except ImportError as e:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_backtest(symbol: str, interval: str = "1h", period: str = "180d",
-                 initial_capital: float = 10_000, risk_pct: float = 1.0):
+                 initial_capital: float = 10_000, risk_pct: float = 1.0,
+                 min_score: float = 4.0, max_daily_trades: int = 0):
     """
     Rejoue la stratégie bougie par bougie sur données historiques.
 
@@ -58,7 +62,22 @@ def run_backtest(symbol: str, interval: str = "1h", period: str = "180d",
         return None
 
     df_raw = calculate_vwap(df_raw)
+    df_raw = calculate_idr(df_raw)
     df_raw = df_raw.dropna(subset=["VWAP", "ATR"])
+
+    # ── Multi-timeframe : fusion EMAs 1h pour les intervalles intraday ────────
+    if interval in INTRADAY_INTERVALS:
+        print(f"📡 Chargement EMAs 1h (filtre macro multi-timeframe)...")
+        macro = get_macro_ema(symbol)
+        if macro is not None:
+            macro_aligned = macro.reindex(
+                macro.index.union(df_raw.index)
+            ).ffill().reindex(df_raw.index)
+            df_raw = df_raw.join(macro_aligned)
+            print(f"✅ EMAs 1h fusionnées ({macro_aligned['EMA50_macro'].notna().sum()} barres alignées)")
+        else:
+            print("⚠️  EMAs 1h indisponibles, filtre macro désactivé")
+
     print(f"✅ {len(df_raw)} bougies chargées ({df_raw.index[0].date()} → {df_raw.index[-1].date()})")
 
     # ── 2. Simulation bougie par bougie ───────────────────────────────────────
@@ -67,12 +86,14 @@ def run_backtest(symbol: str, interval: str = "1h", period: str = "180d",
     trades      = []
     position    = None          # trade en cours
     last_signal = None
+    daily_trade_count = {}      # date -> nb trades pris ce jour
 
     # On simule à partir de la bougie 20 (assez d'historique pour VWAP/ATR)
     for i in range(20, len(df_raw)):
         window   = df_raw.iloc[:i+1]
         cur_bar  = df_raw.iloc[i]
         cur_time = df_raw.index[i]
+        cur_date = cur_time.date()
 
         # ── Gestion de la position ouverte ────────────────────────────────────
         if position is not None:
@@ -116,6 +137,9 @@ def run_backtest(symbol: str, interval: str = "1h", period: str = "180d",
                     "capital":     round(capital, 2),
                     "win":         pnl_dollar > 0,
                 })
+                # Comptabiliser le trade dans le quota journalier
+                trade_date = position["open_time"].date()
+                daily_trade_count[trade_date] = daily_trade_count.get(trade_date, 0) + 1
                 position    = None
                 last_signal = None
 
@@ -123,13 +147,21 @@ def run_backtest(symbol: str, interval: str = "1h", period: str = "180d",
 
         # ── Recherche de signal (seulement si pas en position) ─────────────────
         if position is None:
-            signal, reason_sig = detect_signal(window)
+            # Quota journalier atteint → on passe
+            if max_daily_trades > 0 and daily_trade_count.get(cur_date, 0) >= max_daily_trades:
+                continue
+
+            signal, reason_sig, meta = detect_signal(window, min_score=min_score)
 
             if signal and signal != last_signal:
                 last_signal  = signal
                 entry_price  = cur_bar["Close"]
                 atr          = cur_bar["ATR"]
-                sl, tp       = calculate_sl_tp(entry_price, signal, atr)
+                sl, tp       = calculate_sl_tp(
+                    entry_price, signal, atr,
+                    tp_level=meta.get("tp"),
+                    sl_level=meta.get("sl"),
+                )
 
                 position = {
                     "type":      signal,
@@ -470,7 +502,9 @@ if __name__ == "__main__":
     parser.add_argument("--period",   default="180d",  help="Période yfinance ex: 60d, 180d (défaut: 180d)")
     parser.add_argument("--capital",  default=10000,   type=float, help="Capital initial en $ (défaut: 10000)")
     parser.add_argument("--risk",     default=1.0,     type=float, help="% risqué par trade (défaut: 1.0)")
-    parser.add_argument("--output",   default="backtest_report.html", help="Chemin du rapport HTML")
+    parser.add_argument("--output",           default="backtest_report.html", help="Chemin du rapport HTML")
+    parser.add_argument("--min-score",        default=4.0, type=float, help="Score minimum de confluence (défaut: 4.0)")
+    parser.add_argument("--max-daily-trades", default=0,   type=int,   help="Max trades/jour, 0=illimité (défaut: 0)")
     args = parser.parse_args()
 
     symbols = [args.symbol] if args.symbol else ["XAUUSD", "US100", "US500"]
@@ -483,6 +517,8 @@ if __name__ == "__main__":
             period=args.period,
             initial_capital=args.capital,
             risk_pct=args.risk,
+            min_score=args.min_score,
+            max_daily_trades=args.max_daily_trades,
         )
         if res:
             all_results.append(res)
