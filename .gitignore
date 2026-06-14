@@ -29,4 +29,4 @@ desktop.ini
 
 # Fichiers temporaires
 *.tmp
-*.bak
+*.bak.env
