@@ -10,7 +10,7 @@ import json
 import pandas as pd
 import numpy as np
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import asyncio
 import threading
 import time
@@ -125,12 +125,15 @@ def update_trade_exit(symbol, exit_price, pnl):
     trades = load_trades()
     if not trades:
         return
+    now_str = datetime.now().isoformat()
     for t in trades:
+        # Préserver la date comme string, ou mettre now() si absente/NaT
+        d = t.get('date')
+        t['date'] = now_str if (d is None or str(d) in ('NaT', '', 'nan')) else str(d)
         if t.get('symbol') == symbol and t.get('status') == 'open':
             t['exit_price'] = exit_price
             t['pnl']        = pnl
             t['status']     = 'closed'
-            break
     pd.DataFrame(trades).to_csv(TRADES_FILE, index=False)
 
 def run_auto_critique():
@@ -241,8 +244,10 @@ def build_portfolio_summary(initial_capital: float = INITIAL_PORTFOLIO) -> dict:
         if t.get("status") != "closed":
             continue
         dt = pd.to_datetime(t.get("date"), errors="coerce")
+        # Si la date est absente, utiliser la dernière date connue + 1 min (ou now())
         if pd.isna(dt):
-            continue
+            fallback = closed[-1][0] + timedelta(minutes=1) if closed else datetime.now()
+            dt = pd.Timestamp(fallback)
         try:
             pnl = float(t.get("pnl", 0) or 0)
         except:
@@ -252,14 +257,22 @@ def build_portfolio_summary(initial_capital: float = INITIAL_PORTFOLIO) -> dict:
     closed.sort(key=lambda x: x[0])
     equity = float(initial_capital)
     wins   = 0
-    equity_curve   = [{"time": datetime.now().isoformat(), "value": round(equity, 2)}]
+    pnl_curve      = []
+    win_rate_curve = []
     latest_updates = []
 
-    for dt, t, pnl in closed:
+    for i, (dt, t, pnl) in enumerate(closed):
+        if not pnl_curve:
+            start = (dt - timedelta(minutes=1)).isoformat()
+            pnl_curve.append({"time": start, "value": 0.0})
+            win_rate_curve.append({"time": start, "value": 0.0})
         equity *= 1 + (pnl / 100.0)
         if pnl > 0:
             wins += 1
-        equity_curve.append({"time": dt.isoformat(), "value": round(equity, 2)})
+        cum_pnl = round(((equity / initial_capital) - 1) * 100, 2)
+        wr      = round((wins / (i + 1)) * 100, 2)
+        pnl_curve.append({"time": dt.isoformat(), "value": cum_pnl})
+        win_rate_curve.append({"time": dt.isoformat(), "value": wr})
         latest_updates.append({
             "date":   dt.isoformat(),
             "symbol": t.get("symbol", ""),
@@ -276,7 +289,8 @@ def build_portfolio_summary(initial_capital: float = INITIAL_PORTFOLIO) -> dict:
         "total_return_pct": round(((equity / initial_capital) - 1) * 100, 2) if initial_capital else 0,
         "closed_trades":    n,
         "win_rate":         round((wins / n) * 100, 2) if n else 0.0,
-        "equity_curve":     equity_curve,
+        "pnl_curve":        pnl_curve,
+        "win_rate_curve":   win_rate_curve,
         "trade_updates":    latest_updates[-25:][::-1],
         "generated_at":     datetime.now().isoformat(),
     }
@@ -375,8 +389,6 @@ async def check_and_execute_trades(symbol: str):
     sentiment = get_sentiment(symbol)
     if not sentiment_allows_trade(sentiment, signal):
         print(f"📰 {signal} {symbol} bloqué — {sentiment['signal']} ({sentiment['confidence']}%)")
-        alert_signal_blocked(symbol, signal,
-                             sentiment['signal'], sentiment['confidence'], sentiment['summary'])
         last_signal_state[symbol] = signal
         _save_last_signal_state()
         return

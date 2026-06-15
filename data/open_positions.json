@@ -1,1 +1,24 @@
-{}
+{
+  "US100": {
+    "date": "2026-06-15T15:56:32.093771",
+    "symbol": "US100",
+    "type": "LONG",
+    "entry_price": 30843.0,
+    "exit_price": 0,
+    "pnl": 0,
+    "status": "open",
+    "sl": 30772.156,
+    "tp": 30954.3361
+  },
+  "US500": {
+    "date": "2026-06-15T15:56:43.513535",
+    "symbol": "US500",
+    "type": "LONG",
+    "entry_price": 7637.0,
+    "exit_price": 0,
+    "pnl": 0,
+    "status": "open",
+    "sl": 7628.066,
+    "tp": 7662.2627
+  }
+}

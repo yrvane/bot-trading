@@ -14,8 +14,8 @@ from datetime import time as dtime
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SESSIONS = {
-    "morning":   (dtime(8, 0),  dtime(12, 0)),
-    "afternoon": (dtime(15, 0), dtime(18, 0)),
+    "morning":   (dtime(8, 0),  dtime(11, 0)),
+    "afternoon": (dtime(14, 0), dtime(17, 0)),
 }
 
 def get_active_session(dt) -> str:

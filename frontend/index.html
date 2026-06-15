@@ -593,7 +593,8 @@
 <script>
 let currentSymbol = 'XAUUSD';
 let chart = null;
-let equitySeries = null;
+let pnlSeries = null;
+let winRateSeries = null;
 let ws = null;
 let wsRetryTimer = null;
 let lastPrice = null;
@@ -638,12 +639,14 @@ function formatPct(value) {
 
 function initChart() {
   const el = document.getElementById('chart');
+
   chart = LightweightCharts.createChart(el, {
-    width: el.clientWidth,
-    height: el.clientHeight,
+    width:  el.clientWidth  || 800,
+    height: el.clientHeight || 400,
     layout: { background: { color: '#060912' }, textColor: '#c8d8ff' },
-    grid: { vertLines: { color: '#0e1628' }, horzLines: { color: '#0e1628' } },
-    rightPriceScale: { borderColor: '#1a2240' },
+    grid:   { vertLines: { color: '#0e1628' }, horzLines: { color: '#0e1628' } },
+    leftPriceScale:  { visible: true, borderColor: '#1a2240' },
+    rightPriceScale: { visible: true, borderColor: '#1a2240' },
     timeScale: { borderColor: '#1a2240', timeVisible: true, secondsVisible: false },
     crosshair: {
       mode: LightweightCharts.CrosshairMode.Normal,
@@ -652,11 +655,34 @@ function initChart() {
     },
   });
 
-  equitySeries = chart.addLineSeries({
+  pnlSeries = chart.addLineSeries({
     color: '#00e5ff',
     lineWidth: 2,
     priceLineVisible: false,
     crosshairMarkerVisible: true,
+    title: 'PnL %',
+    priceScaleId: 'left',
+  });
+
+  winRateSeries = chart.addLineSeries({
+    color: '#ffc23a',
+    lineWidth: 2,
+    priceLineVisible: false,
+    crosshairMarkerVisible: true,
+    title: 'Win Rate %',
+    priceScaleId: 'right',
+    lineStyle: 1,
+    autoscaleInfoProvider: () => ({
+      priceRange: { minValue: 0, maxValue: 100 },
+    }),
+  });
+
+  chart.priceScale('left').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
+  chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.05, bottom: 0.05 } });
+
+  // Correction de taille si le DOM n'était pas encore rendu
+  requestAnimationFrame(() => {
+    chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
   });
 
   window.addEventListener('resize', () => {
@@ -664,16 +690,20 @@ function initChart() {
   });
 }
 
-function renderEquityCurve(points) {
-  const data = (points || []).map(point => ({
-    time: Math.floor(new Date(point.time).getTime() / 1000),
-    value: Number(point.value),
-  })).filter(point => !Number.isNaN(point.time) && !Number.isNaN(point.value));
+function toChartPoints(points) {
+  return (points || []).map(p => ({
+    time:  Math.floor(new Date(p.time).getTime() / 1000),
+    value: Number(p.value),
+  })).filter(p => !Number.isNaN(p.time) && !Number.isNaN(p.value))
+    .sort((a, b) => a.time - b.time);
+}
 
-  equitySeries.setData(data);
-  if (data.length) {
-    chart.timeScale().fitContent();
-  }
+function renderPerformanceChart(portfolio) {
+  const pnlData     = toChartPoints(portfolio.pnl_curve);
+  const winRateData = toChartPoints(portfolio.win_rate_curve);
+  pnlSeries.setData(pnlData);
+  winRateSeries.setData(winRateData);
+  if (pnlData.length) chart.timeScale().fitContent();
 }
 
 function updatePortfolioView(portfolio) {
@@ -702,7 +732,7 @@ function updatePortfolioView(portfolio) {
   document.getElementById('signalBar').textContent = statusLine;
   document.getElementById('signalBar').className = 'signal-bar wait';
 
-  renderEquityCurve(portfolio.equity_curve || []);
+  renderPerformanceChart(portfolio);
 }
 
 function loadPortfolio() {
@@ -767,7 +797,7 @@ function connectWS() {
       }
       if (message.type === 'trade_closed') {
         handleClosed(message);
-        loadPortfolio();
+        setTimeout(() => { loadPortfolio(); refreshTrades(); }, 500);
       }
       if (message.type === 'position_update') {
         refreshPositions();
@@ -963,7 +993,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   setInterval(() => {
     loadPortfolio();
-  }, 30000);
+    refreshTrades();
+  }, 10000);
 
   setInterval(() => {
     loadNews();
