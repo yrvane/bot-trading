@@ -871,6 +871,12 @@ function refreshPositions() {
         return;
       }
 
+      positions = positions.filter(p => p.symbol === currentSymbol);
+      if (!positions.length) {
+        list.innerHTML = '<div style="color:var(--muted);font-family:\'Share Tech Mono\',monospace;font-size:.7rem;text-align:center;padding:24px 0;letter-spacing:.08em;">[ AUCUNE POSITION OUVERTE ]</div>';
+        return;
+      }
+
       list.innerHTML = positions.map(position => {
         const isLong = position.type === 'LONG';
         const pnl = lastPrice

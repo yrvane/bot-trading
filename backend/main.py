@@ -10,7 +10,7 @@ import json
 import pandas as pd
 import numpy as np
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 import threading
 import time
@@ -42,9 +42,56 @@ os.makedirs(os.path.dirname(TRADES_FILE), exist_ok=True)
 INITIAL_PORTFOLIO        = 50000.0
 DAILY_SUMMARY_TIME_UTC   = os.getenv("DAILY_SUMMARY_TIME_UTC", "21:05")
 DAILY_SUMMARY_STATE_FILE = os.path.join(BASE_DIR, "data", "daily_summary_state.json")
+OPEN_POSITIONS_FILE      = os.path.join(BASE_DIR, "data", "open_positions.json")
+LAST_SIGNAL_STATE_FILE   = os.path.join(BASE_DIR, "data", "last_signal_state.json")
 
-open_positions    = {}
-last_signal_state = {}
+def _save_open_positions():
+    with open(OPEN_POSITIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(open_positions, f, indent=2, default=str)
+
+def _load_open_positions() -> dict:
+    try:
+        with open(OPEN_POSITIONS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        pass
+    # Reconstruire depuis le CSV si le JSON n'existe pas
+    try:
+        import pandas as pd
+        df = pd.read_csv(TRADES_FILE)
+        open_rows = df[df['status'] == 'open']
+        result = {}
+        for _, row in open_rows.iterrows():
+            result[row['symbol']] = {
+                'date':        str(row['date']),
+                'symbol':      row['symbol'],
+                'type':        row['type'],
+                'entry_price': float(row['entry_price']),
+                'exit_price':  float(row['exit_price']),
+                'pnl':         float(row['pnl']),
+                'status':      row['status'],
+                'sl':          float(row['sl']),
+                'tp':          float(row['tp']),
+            }
+        if result:
+            print(f"📂 {len(result)} position(s) restaurée(s) depuis le CSV")
+        return result
+    except:
+        return {}
+
+def _save_last_signal_state():
+    with open(LAST_SIGNAL_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(last_signal_state, f, indent=2)
+
+def _load_last_signal_state() -> dict:
+    try:
+        with open(LAST_SIGNAL_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
+
+open_positions    = _load_open_positions()
+last_signal_state = _load_last_signal_state()
 strategy_config   = load_config()
 
 print(f"⚙️  Config : SL {strategy_config['sl_mult']}x | TP {strategy_config['tp_mult']}x")
@@ -57,7 +104,9 @@ print(f"⚙️  Config : SL {strategy_config['sl_mult']}x | TP {strategy_config[
 def load_trades():
     try:
         df = pd.read_csv(TRADES_FILE)
-        df['date'] = pd.to_datetime(df['date'])
+        if df.empty:
+            return []
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
         return df.to_dict('records')
     except:
         return []
@@ -74,6 +123,8 @@ def save_trade(trade):
 
 def update_trade_exit(symbol, exit_price, pnl):
     trades = load_trades()
+    if not trades:
+        return
     for t in trades:
         if t.get('symbol') == symbol and t.get('status') == 'open':
             t['exit_price'] = exit_price
@@ -116,7 +167,7 @@ def save_daily_summary_state(state: dict):
         json.dump(state, f, indent=2)
 
 def build_daily_summary() -> dict:
-    today_utc = datetime.utcnow().date()
+    today_utc = datetime.now(timezone.utc).date()
     trades = load_trades()
     today_trades  = [t for t in trades if pd.to_datetime(t.get("date"), errors="coerce").date() == today_utc]
     closed_today  = [t for t in today_trades if t.get("status") == "closed"]
@@ -157,7 +208,7 @@ def build_daily_summary() -> dict:
     }
 
 def should_send_daily_summary(now_utc=None) -> bool:
-    now_utc = now_utc or datetime.utcnow()
+    now_utc = now_utc or datetime.now(timezone.utc)
     try:
         h, m = [int(x) for x in DAILY_SUMMARY_TIME_UTC.split(":", 1)]
     except:
@@ -173,7 +224,7 @@ def daily_summary_worker():
             if should_send_daily_summary():
                 summary = build_daily_summary()
                 if alert_daily_summary(summary):
-                    save_daily_summary_state({"last_sent_date": datetime.utcnow().date().isoformat()})
+                    save_daily_summary_state({"last_sent_date": datetime.now(timezone.utc).date().isoformat()})
         except Exception as e:
             print(f"⚠️  Daily summary error : {e}")
         time.sleep(60)
@@ -292,6 +343,7 @@ async def check_and_execute_trades(symbol: str):
         if exit_price:
             update_trade_exit(symbol, exit_price, pnl)
             del open_positions[symbol]
+            _save_open_positions()
             await manager.broadcast({
                 "type": "trade_closed", "symbol": symbol,
                 "exit_price": exit_price, "pnl": pnl, "reason": reason
@@ -325,10 +377,13 @@ async def check_and_execute_trades(symbol: str):
         print(f"📰 {signal} {symbol} bloqué — {sentiment['signal']} ({sentiment['confidence']}%)")
         alert_signal_blocked(symbol, signal,
                              sentiment['signal'], sentiment['confidence'], sentiment['summary'])
+        last_signal_state[symbol] = signal
+        _save_last_signal_state()
         return
 
     # ── Ouvrir la position ────────────────────────────────────────────────────
     last_signal_state[symbol] = signal
+    _save_last_signal_state()
     current_price = get_current_price_yfinance(symbol)
     if not current_price:
         return
@@ -353,7 +408,7 @@ async def check_and_execute_trades(symbol: str):
     )
 
     trade = {
-        'date':        datetime.now(),
+        'date':        datetime.now().isoformat(),
         'symbol':      symbol,
         'type':        signal,
         'entry_price': current_price,
@@ -365,6 +420,7 @@ async def check_and_execute_trades(symbol: str):
     }
     save_trade(trade)
     open_positions[symbol] = trade
+    _save_open_positions()
 
     await manager.broadcast({
         "type": "new_trade", "trade": trade,
