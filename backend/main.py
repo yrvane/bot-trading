@@ -15,7 +15,7 @@ import asyncio
 import threading
 import time
 
-from data_fetcher    import get_historical_data_yfinance, get_current_price_yfinance
+from data_fetcher    import get_historical_data_yfinance, get_current_price_yfinance, get_macro_ema
 from strategies      import (calculate_vwap, calculate_idr, detect_signal,
                               calculate_sl_tp, find_last_impulse)
 from trade_analyzer  import (load_trades as analyzer_load, analyze,
@@ -376,6 +376,11 @@ async def check_and_execute_trades(symbol: str):
     df = df.dropna(subset=['VWAP', 'ATR'])
     if len(df) < 25:
         return
+
+    macro_df = get_macro_ema(symbol)
+    if macro_df is not None and not macro_df.empty:
+        df['EMA50_macro']  = macro_df['EMA50_macro'].iloc[-1]
+        df['EMA200_macro'] = macro_df['EMA200_macro'].iloc[-1]
 
     signal, reason, _meta = detect_signal(df)
 

@@ -319,14 +319,25 @@ def detect_signal(df: pd.DataFrame,
     if session == "off":
         return None, f"Hors session ({df.index[-1].strftime('%H:%M')} UTC)", {}
 
-    # ── 2. Filtre macro EMA (bloquant) ────────────────────────────────────────
+    # ── 2. Filtre directionnel : EMA 1h + biais VWAP ─────────────────────────
     ema50  = last.get('EMA50_macro',  last.get('EMA50',  np.nan))
     ema200 = last.get('EMA200_macro', last.get('EMA200', np.nan))
-    macro_src = "1h" if 'EMA50_macro' in last.index else "native"
+    vwap   = last.get('VWAP', np.nan)
+    macro_src = "1h+VWAP" if 'EMA50_macro' in last.index else "native"
+
     macro_ok = {"LONG": True, "SHORT": True}
-    if require_macro_trend and not pd.isna(ema50) and not pd.isna(ema200):
-        macro_ok["LONG"]  = ema50 >= ema200
-        macro_ok["SHORT"] = ema50 <= ema200
+    if require_macro_trend:
+        ema_available  = not pd.isna(ema50) and not pd.isna(ema200)
+        vwap_available = not pd.isna(vwap)
+
+        ema_bull  = ema_available  and ema50 >= ema200
+        ema_bear  = ema_available  and ema50 <= ema200
+        vwap_bull = vwap_available and price > vwap
+        vwap_bear = vwap_available and price < vwap
+
+        # Les deux doivent être alignés pour autoriser la direction
+        macro_ok["LONG"]  = (ema_bull  if ema_available  else True) and (vwap_bull if vwap_available else True)
+        macro_ok["SHORT"] = (ema_bear  if ema_available  else True) and (vwap_bear if vwap_available else True)
 
     # ── Niveaux clés disponibles ──────────────────────────────────────────────
     levels  = _get_key_levels(last)
