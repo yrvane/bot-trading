@@ -1,0 +1,253 @@
+//@version=5
+indicator("VWAP Strategy — Setup A/B", overlay=true, max_bars_back=500, max_labels_count=500)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+i_show_bands = input.bool(true,  "Bandes VWAP (±1σ, ±2σ)",     group="Affichage")
+i_show_idr   = input.bool(true,  "Niveaux IDR / DR",            group="Affichage")
+i_show_label = input.bool(true,  "Labels SL / TP",              group="Affichage")
+i_macro      = input.bool(true,  "Filtre macro EMA50/200 (1h)", group="Filtres")
+i_rr_a       = input.float(1.0,  "RR min — Setup A",            group="Filtres", minval=0.5, step=0.1)
+i_rr_b       = input.float(1.5,  "RR min — Setup B",            group="Filtres", minval=0.5, step=0.1)
+i_atr_len    = input.int(14,     "ATR Length",                  group="Paramètres")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ATR
+// ══════════════════════════════════════════════════════════════════════════════
+atr = ta.atr(i_atr_len)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  SESSIONS — 08:00-11:00 & 14:00-17:00 UTC
+// ══════════════════════════════════════════════════════════════════════════════
+in_session = not na(time(timeframe.period, "0800-1100:1234567", "UTC")) or
+             not na(time(timeframe.period, "1400-1700:1234567", "UTC"))
+
+bgcolor(in_session ? color.new(color.blue, 96) : na, title="Session active")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  VWAP DAILY + ÉCARTS-TYPES
+// ══════════════════════════════════════════════════════════════════════════════
+new_day = dayofmonth != dayofmonth[1] or bar_index == 0
+
+var float _pv  = 0.0
+var float _vol = 0.0
+var float _var = 0.0
+
+if new_day
+    _pv  := 0.0
+    _vol := 0.0
+    _var := 0.0
+
+tp_bar = (high + low + close) / 3
+_pv   += tp_bar * volume
+_vol  += volume
+
+vwap  = _vol > 0 ? _pv / _vol : na
+_var += not na(vwap) ? math.pow(tp_bar - vwap, 2) * volume : 0.0
+sd    = _vol > 0 and not na(vwap) ? math.sqrt(_var / _vol) : na
+
+vp1 = not na(sd) ? vwap + sd     : na
+vp2 = not na(sd) ? vwap + sd * 2 : na
+vm1 = not na(sd) ? vwap - sd     : na
+vm2 = not na(sd) ? vwap - sd * 2 : na
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  IDR — 07:00-09:00 UTC (ouverture London)
+// ══════════════════════════════════════════════════════════════════════════════
+in_idr = not na(time(timeframe.period, "0700-0900:1234567", "UTC"))
+
+var float idr_h = na
+var float idr_l = na
+
+if new_day
+    idr_h := na
+    idr_l := na
+
+if in_idr
+    idr_h := na(idr_h) ? high : math.max(idr_h, high)
+    idr_l := na(idr_l) ? low  : math.min(idr_l, low)
+
+idr_m = na(idr_h) or na(idr_l) ? na : (idr_h + idr_l) / 2
+
+// DR — range journalier complet
+var float dr_h = na
+var float dr_l = na
+
+if new_day
+    dr_h := na
+    dr_l := na
+
+dr_h := na(dr_h) ? high : math.max(dr_h, high)
+dr_l := na(dr_l) ? low  : math.min(dr_l, low)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  MACRO TREND — EMA 50 / 200 sur 1h (multi-timeframe, sans lookahead)
+// ══════════════════════════════════════════════════════════════════════════════
+ema50_h1  = request.security(syminfo.tickerid, "60", ta.ema(close, 50),  lookahead=barmerge.lookahead_off)
+ema200_h1 = request.security(syminfo.tickerid, "60", ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+
+macro_bull = i_macro ? ema50_h1 >= ema200_h1 and not na(vwap) and close > vwap : true
+macro_bear = i_macro ? ema50_h1 <= ema200_h1 and not na(vwap) and close < vwap : true
+
+_macro_bg = macro_bull and not macro_bear ? color.new(color.green, 99) : macro_bear and not macro_bull ? color.new(color.red, 99) : na
+bgcolor(_macro_bg, title="Biais macro")
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  HELPERS — Rejet de bougie sur un niveau
+// ══════════════════════════════════════════════════════════════════════════════
+// LONG  : mèche basse touche le niveau, close au-dessus, corps haussier ou neutre
+rej_l(lvl) =>
+    not na(lvl) and low <= lvl + atr * 0.5 and close > lvl and close >= open
+
+// SHORT : mèche haute touche le niveau, close en-dessous, corps baissier ou neutre
+rej_s(lvl) =>
+    not na(lvl) and high >= lvl - atr * 0.5 and close < lvl and close <= open
+
+// Niveau cible le plus proche au-dessus du prix (pour LONG)
+f_tp_l(min_d) =>
+    b = float(na)
+    for i = 0 to 9
+        lv = i == 0 ? vwap : i == 1 ? vp1   : i == 2 ? vp2  : i == 3 ? vm1 : i == 4 ? vm2 :
+             i == 5 ? idr_h : i == 6 ? idr_l : i == 7 ? idr_m : i == 8 ? dr_h : dr_l
+        if not na(lv) and lv > close + min_d
+            b := na(b) or lv < b ? lv : b
+    b
+
+// Niveau cible le plus proche en-dessous du prix (pour SHORT)
+f_tp_s(min_d) =>
+    b = float(na)
+    for i = 0 to 9
+        lv = i == 0 ? vwap : i == 1 ? vp1   : i == 2 ? vp2  : i == 3 ? vm1 : i == 4 ? vm2 :
+             i == 5 ? idr_h : i == 6 ? idr_l : i == 7 ? idr_m : i == 8 ? dr_h : dr_l
+        if not na(lv) and lv < close - min_d
+            b := na(b) or lv > b ? lv : b
+    b
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  DÉTECTION DE SIGNAL
+// ══════════════════════════════════════════════════════════════════════════════
+hist_h = ta.highest(close, 25)   // plus haut close sur 25 bougies (Setup A)
+hist_l = ta.lowest(close,  25)   // plus bas  close sur 25 bougies (Setup A)
+
+// Pre-calcul des cibles TP (une seule fois, hors boucle de niveaux)
+tp_al = f_tp_l(atr * 0.8)
+tp_bl = f_tp_l(atr * 1.0)
+tp_as = f_tp_s(atr * 0.8)
+tp_bs = f_tp_s(atr * 1.0)
+
+sig_long  = false
+sig_short = false
+sig_tp    = float(na)
+sig_sl    = float(na)
+sig_rr    = float(0.0)
+sig_text  = ""
+
+if in_session
+    for i = 0 to 9
+        lvl = i == 0 ? vwap : i == 1 ? vp1   : i == 2 ? vp2  : i == 3 ? vm1 : i == 4 ? vm2 :
+              i == 5 ? idr_h : i == 6 ? idr_l : i == 7 ? idr_m : i == 8 ? dr_h : dr_l
+        lnm = i == 0 ? "VWAP"    : i == 1 ? "VWAP+1σ" : i == 2 ? "VWAP+2σ" :
+              i == 3 ? "VWAP-1σ" : i == 4 ? "VWAP-2σ" : i == 5 ? "IDR_H"   :
+              i == 6 ? "IDR_L"   : i == 7 ? "IDR_M"   : i == 8 ? "DR_H"    : "DR_L"
+
+        if not na(lvl) and not sig_long and not sig_short
+            // ── Setup A Long ── post-breakout retest haussier ─────────────
+            sl_al = lvl - atr * 0.5
+            rr_al = not na(tp_al) ? (tp_al - close) / math.max(close - sl_al, 1e-9) : 0.0
+            if macro_bull and rej_l(lvl) and
+               hist_h > lvl + atr * 0.8 and
+               close <= lvl + atr * 1.2 and
+               not na(tp_al) and rr_al >= i_rr_a
+                sig_long := true
+                sig_tp   := tp_al
+                sig_sl   := sl_al
+                sig_rr   := rr_al
+                sig_text := "Setup A ↑  " + lnm
+
+            // ── Setup A Short ── post-breakout retest baissier ────────────
+            if not sig_long and not sig_short
+                sl_as = lvl + atr * 0.5
+                rr_as = not na(tp_as) ? (close - tp_as) / math.max(sl_as - close, 1e-9) : 0.0
+                if macro_bear and rej_s(lvl) and
+                   hist_l < lvl - atr * 0.8 and
+                   close >= lvl - atr * 1.2 and
+                   not na(tp_as) and rr_as >= i_rr_a
+                    sig_short := true
+                    sig_tp    := tp_as
+                    sig_sl    := sl_as
+                    sig_rr    := rr_as
+                    sig_text  := "Setup A ↓  " + lnm
+
+            // ── Setup B Long ── rejet sur support → target opposé ─────────
+            if not sig_long and not sig_short
+                sl_bl = lvl - atr * 0.5
+                rr_bl = not na(tp_bl) ? (tp_bl - close) / math.max(close - sl_bl, 1e-9) : 0.0
+                if macro_bull and rej_l(lvl) and not na(tp_bl) and rr_bl >= i_rr_b
+                    sig_long := true
+                    sig_tp   := tp_bl
+                    sig_sl   := sl_bl
+                    sig_rr   := rr_bl
+                    sig_text := "Setup B ↑  " + lnm
+
+            // ── Setup B Short ── rejet sur résistance → target opposé ─────
+            if not sig_long and not sig_short
+                sl_bs = lvl + atr * 0.5
+                rr_bs = not na(tp_bs) ? (close - tp_bs) / math.max(sl_bs - close, 1e-9) : 0.0
+                if macro_bear and rej_s(lvl) and not na(tp_bs) and rr_bs >= i_rr_b
+                    sig_short := true
+                    sig_tp    := tp_bs
+                    sig_sl    := sl_bs
+                    sig_rr    := rr_bs
+                    sig_text  := "Setup B ↓  " + lnm
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  TRACÉ DES NIVEAUX CLÉS
+// ══════════════════════════════════════════════════════════════════════════════
+plot(vwap, "VWAP", color=color.new(color.white, 10), linewidth=2)
+
+p_vp1 = plot(i_show_bands ? vp1 : na, "VWAP+1σ", color=color.new(color.aqua,   40), linewidth=1)
+p_vm1 = plot(i_show_bands ? vm1 : na, "VWAP-1σ", color=color.new(color.aqua,   40), linewidth=1)
+p_vp2 = plot(i_show_bands ? vp2 : na, "VWAP+2σ", color=color.new(color.purple, 50), linewidth=1)
+p_vm2 = plot(i_show_bands ? vm2 : na, "VWAP-2σ", color=color.new(color.purple, 50), linewidth=1)
+
+fill(p_vp1, p_vm1, color=color.new(color.aqua,   94), title="Zone ±1σ")
+fill(p_vp2, p_vp1, color=color.new(color.purple, 96), title="Zone +1σ/+2σ")
+fill(p_vm1, p_vm2, color=color.new(color.purple, 96), title="Zone -1σ/-2σ")
+
+plot(i_show_idr ? idr_h : na, "IDR High", color=color.new(color.yellow, 20), style=plot.style_stepline, linewidth=1)
+plot(i_show_idr ? idr_l : na, "IDR Low",  color=color.new(color.yellow, 20), style=plot.style_stepline, linewidth=1)
+plot(i_show_idr ? idr_m : na, "IDR Mid",  color=color.new(color.yellow, 55), style=plot.style_stepline, linewidth=1)
+plot(i_show_idr ? dr_h  : na, "DR High",  color=color.new(color.orange, 40), style=plot.style_stepline, linewidth=1)
+plot(i_show_idr ? dr_l  : na, "DR Low",   color=color.new(color.orange, 40), style=plot.style_stepline, linewidth=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  SIGNAUX — FLÈCHES + LABELS
+// ══════════════════════════════════════════════════════════════════════════════
+plotshape(sig_long,  "LONG",  shape.triangleup,   location.belowbar,
+          color.new(color.lime, 0), size=size.normal)
+plotshape(sig_short, "SHORT", shape.triangledown, location.abovebar,
+          color.new(color.red,  0), size=size.normal)
+
+if i_show_label and barstate.isconfirmed
+    if sig_long
+        label.new(bar_index, low - atr * 1.5,
+                  text      = sig_text +
+                              "\nTP  " + str.tostring(sig_tp, "#.##") +
+                              "\nSL  " + str.tostring(sig_sl, "#.##") +
+                              "\nRR  " + str.tostring(sig_rr, "#.#") + "x",
+                  style     = label.style_label_up,
+                  color     = color.new(color.lime, 5),
+                  textcolor = color.black,
+                  size      = size.small)
+
+    if sig_short
+        label.new(bar_index, high + atr * 1.5,
+                  text      = sig_text +
+                              "\nTP  " + str.tostring(sig_tp, "#.##") +
+                              "\nSL  " + str.tostring(sig_sl, "#.##") +
+                              "\nRR  " + str.tostring(sig_rr, "#.#") + "x",
+                  style     = label.style_label_down,
+                  color     = color.new(color.red, 5),
+                  textcolor = color.white,
+                  size      = size.small)

@@ -350,9 +350,12 @@ def detect_signal(df: pd.DataFrame,
     for level_name, level_val in sorted(levels.items(), key=lambda x: abs(x[1] - price)):
 
         # LONG : breakout haussier récent + retest du niveau par le bas
+        # pullback propre : le plus bas de la fenêtre n'a pas cassé sous le niveau
+        pullback_long = history['Low'].min() >= level_val - atr * 1.5
         if (macro_ok["LONG"] and
                 history['Close'].max() > level_val + atr * 0.8 and   # fut au-dessus
                 price <= level_val + atr * 1.2 and                   # est revenu near
+                pullback_long and                                      # n'a pas cassé sous
                 _is_rejection(last, level_val, "LONG", tol)):
 
             tp, tp_name = _next_level(levels, price, "LONG", min_dist=atr * 0.8)
@@ -368,9 +371,12 @@ def detect_signal(df: pd.DataFrame,
                     {"tp": tp, "sl": sl})
 
         # SHORT : breakout baissier récent + retest du niveau par le haut
+        # pullback propre : le plus haut de la fenêtre n'a pas recassé au-dessus du niveau
+        pullback_short = history['High'].max() <= level_val + atr * 1.5
         if (macro_ok["SHORT"] and
                 history['Close'].min() < level_val - atr * 0.8 and   # fut en-dessous
                 price >= level_val - atr * 1.2 and                   # est revenu near
+                pullback_short and                                     # n'a pas recassé au-dessus
                 _is_rejection(last, level_val, "SHORT", tol)):
 
             tp, tp_name = _next_level(levels, price, "SHORT", min_dist=atr * 0.8)
