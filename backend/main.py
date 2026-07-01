@@ -550,7 +550,7 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
                     "position": open_positions[symbol]
                 })
             await asyncio.sleep(5)
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
         manager.disconnect(websocket)
 
 
