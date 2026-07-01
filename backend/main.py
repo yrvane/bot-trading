@@ -45,6 +45,11 @@ DAILY_SUMMARY_STATE_FILE = os.path.join(BASE_DIR, "data", "daily_summary_state.j
 OPEN_POSITIONS_FILE      = os.path.join(BASE_DIR, "data", "open_positions.json")
 LAST_SIGNAL_STATE_FILE   = os.path.join(BASE_DIR, "data", "last_signal_state.json")
 
+# Symboles scannés en continu par la boucle de trading de fond (indépendante
+# des clients websocket connectés — voir trading_loop() plus bas).
+SYMBOLS = ["XAUUSD", "US100", "US500"]
+TRADING_SCAN_INTERVAL = int(os.getenv("TRADING_SCAN_INTERVAL_SECONDS", "60"))
+
 def _save_open_positions():
     with open(OPEN_POSITIONS_FILE, "w", encoding="utf-8") as f:
         json.dump(open_positions, f, indent=2, default=str)
@@ -448,6 +453,25 @@ async def check_and_execute_trades(symbol: str):
     print(f"🟢 {signal} {symbol} @ {current_price:.2f} | SL {sl:.2f} | TP {tp:.2f}")
 
 
+async def trading_loop():
+    """Scanne SYMBOLS en boucle, indépendamment des clients websocket connectés.
+    Sans ça, aucun trade n'est cherché/exécuté tant qu'un dashboard n'est pas
+    ouvert dans un navigateur sur le symbole concerné."""
+    while True:
+        for symbol in SYMBOLS:
+            try:
+                await check_and_execute_trades(symbol)
+            except Exception as e:
+                print(f"⚠️  Erreur scan {symbol} : {e}")
+            await asyncio.sleep(2)
+        await asyncio.sleep(TRADING_SCAN_INTERVAL)
+
+
+@app.on_event("startup")
+async def _start_trading_loop():
+    asyncio.create_task(trading_loop())
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  ROUTES API
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -562,12 +586,16 @@ if __name__ == "__main__":
     import uvicorn
     import webbrowser
 
+    HOST = os.getenv("HOST", "127.0.0.1")
+    PORT = int(os.getenv("PORT", "8000"))
+
     def open_browser():
         time.sleep(1.5)
-        webbrowser.open("http://127.0.0.1:8000")
+        webbrowser.open(f"http://{HOST}:{PORT}")
 
     print("🚀 Bot — VWAP + Fibo 0.5/0.618 + Rejet VWAP + DR/IDR + Sessions + Telegram")
     alert_bot_started()
     threading.Thread(target=daily_summary_worker, daemon=True).start()
-    threading.Thread(target=open_browser, daemon=True).start()
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    if os.getenv("OPEN_BROWSER", "1") == "1":
+        threading.Thread(target=open_browser, daemon=True).start()
+    uvicorn.run(app, host=HOST, port=PORT)

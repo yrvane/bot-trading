@@ -1,0 +1,39 @@
+# Service systemd pour faire tourner le bot en continu sur un VPS Linux.
+#
+# Installation (à adapter : User=, WorkingDirectory=, chemins du venv) :
+#   1. Copier ce fichier :  sudo cp deploy/bot-trading.service /etc/systemd/system/
+#   2. Recharger systemd :  sudo systemctl daemon-reload
+#   3. Activer au boot   :  sudo systemctl enable bot-trading
+#   4. Démarrer           :  sudo systemctl start bot-trading
+#
+# Commandes utiles :
+#   sudo systemctl status bot-trading      # état actuel
+#   sudo systemctl restart bot-trading     # relancer manuellement
+#   journalctl -u bot-trading -f           # suivre les logs en direct
+
+[Unit]
+Description=Bot Trading VWAP (FastAPI + uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Remplacer par l'utilisateur linux qui doit faire tourner le bot
+User=REPLACE_ME_username
+# Chemin absolu vers le dossier backend/ du projet sur le VPS
+WorkingDirectory=/home/REPLACE_ME_username/bot-trading/backend
+# Chemin absolu vers l'interpréteur Python du venv
+ExecStart=/home/REPLACE_ME_username/bot-trading/trading_bot_env/bin/python main.py
+EnvironmentFile=/home/REPLACE_ME_username/bot-trading/.env
+Environment=HOST=0.0.0.0
+Environment=PORT=8000
+Environment=OPEN_BROWSER=0
+
+Restart=always
+RestartSec=5
+# Évite les boucles de crash infinies si une erreur de config bloque le démarrage
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target

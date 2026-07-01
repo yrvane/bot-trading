@@ -1,5 +1,5 @@
 {
   "XAUUSD": null,
-  "US500": "LONG",
-  "US100": null
+  "US500": null,
+  "US100": "LONG"
 }

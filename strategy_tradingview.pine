@@ -1,34 +1,79 @@
 //@version=5
-indicator("VWAP Strategy — Setup A/B", overlay=true, max_bars_back=500, max_labels_count=500)
+indicator("VWAP Strategy — Setup A/B/C v6", overlay=true, max_bars_back=500, max_labels_count=500)
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  INPUTS
 // ══════════════════════════════════════════════════════════════════════════════
-i_show_bands = input.bool(true,  "Bandes VWAP (±1σ, ±2σ)",     group="Affichage")
-i_show_idr   = input.bool(true,  "Niveaux IDR / DR",            group="Affichage")
-i_show_label = input.bool(true,  "Labels SL / TP",              group="Affichage")
-i_macro      = input.bool(true,  "Filtre macro EMA50/200 (1h)", group="Filtres")
-i_rr_a       = input.float(1.0,  "RR min — Setup A",            group="Filtres", minval=0.5, step=0.1)
-i_rr_b       = input.float(1.5,  "RR min — Setup B",            group="Filtres", minval=0.5, step=0.1)
-i_atr_len    = input.int(14,     "ATR Length",                  group="Paramètres")
+// — Affichage
+i_show_bands  = input.bool(true,  "Bandes VWAP (±1σ, ±2σ)",              group="Affichage")
+i_show_idr    = input.bool(true,  "Niveaux IDR / DR",                    group="Affichage")
+i_show_asian  = input.bool(true,  "Niveaux Asian Session",               group="Affichage")
+i_show_label  = input.bool(true,  "Labels SL / TP",                      group="Affichage")
+
+// — Filtres classiques
+i_macro       = input.bool(true,  "Filtre macro EMA50/200 (1h)",          group="Filtres")
+i_wick_ratio  = input.float(0.6,  "Ratio mèche/corps min",               group="Filtres", minval=0.2, maxval=2.0, step=0.1)
+i_atr_tol     = input.float(0.3,  "Tolérance ATR pour rejet",            group="Filtres", minval=0.1, maxval=1.0, step=0.1)
+i_rr_a        = input.float(1.0,  "RR min — Setup A",                    group="Filtres", minval=0.5, step=0.1)
+i_rr_b        = input.float(1.5,  "RR min — Setup B",                    group="Filtres", minval=0.5, step=0.1)
+
+// — Filtres v3
+i_struct_bars = input.int(3,      "Bougies structure avant rejet",       group="Filtres v3", minval=1, maxval=6)
+i_body_ratio  = input.float(0.3,  "Corps min bougie rejet (×ATR)",       group="Filtres v3", minval=0.1, maxval=1.0, step=0.05)
+i_range_bars  = input.int(8,      "Lookback range local",                group="Filtres v3", minval=4, maxval=20)
+i_range_mult  = input.float(1.5,  "Range local min (×ATR)",              group="Filtres v3", minval=0.5, maxval=3.0, step=0.1)
+
+// — Paramètres
+i_atr_len     = input.int(14,     "ATR Length",                          group="Paramètres")
+i_lookback    = input.int(10,     "Lookback breakout Setup A",           group="Paramètres", minval=5, maxval=50)
+i_cooldown    = input.int(5,      "Bougies min entre 2 signaux",         group="Paramètres", minval=0)
+
+// — Volume Profile (filtre logique uniquement, rien tracé)
+i_vp_buckets  = input.int(20,     "VP — Nombre de buckets",              group="Volume Profile", minval=10, maxval=40)
+i_vp_hvn_pct  = input.float(70.0, "VP — Seuil HVN (% vol max)",         group="Volume Profile", minval=50.0, maxval=95.0, step=5.0)
+i_vp_lvn_pct  = input.float(30.0, "VP — Seuil LVN (% vol max)",         group="Volume Profile", minval=5.0,  maxval=49.0, step=5.0)
+i_vp_rr_bonus = input.float(0.3,  "VP — Bonus RR si HVN",               group="Volume Profile", minval=0.0,  maxval=1.0,  step=0.1)
+
+// — Setup C (Breakout / momentum, sans exigence de mèche de rejet)
+i_c_enable    = input.bool(true,  "Activer Setup C (Breakout)",         group="Setup C — Breakout")
+i_c_body_mult = input.float(0.8,  "Corps min bougie cassure (×ATR)",    group="Setup C — Breakout", minval=0.3, maxval=2.0, step=0.1)
+i_c_break_atr = input.float(0.3,  "Distance cassure au-delà niveau (×ATR)", group="Setup C — Breakout", minval=0.1, maxval=1.0, step=0.1)
+i_c_vol_mult  = input.float(1.3,  "Volume min (× moyenne)",             group="Setup C — Breakout", minval=1.0, maxval=3.0, step=0.1)
+i_c_vol_len   = input.int(20,     "Lookback moyenne volume",            group="Setup C — Breakout", minval=5, maxval=50)
+i_rr_c        = input.float(1.2,  "RR min — Setup C",                   group="Setup C — Breakout", minval=0.5, step=0.1)
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  ATR
+//  ATR + FILTRE RANGE
 // ══════════════════════════════════════════════════════════════════════════════
-atr = ta.atr(i_atr_len)
+atr          = ta.atr(i_atr_len)
+local_range  = ta.highest(high, i_range_bars) - ta.lowest(low, i_range_bars)
+not_in_range = local_range > atr * i_range_mult
+
+// Volume moyen — confirmation Setup C (une cassure sans volume est peu fiable)
+vol_avg_c = ta.sma(volume, i_c_vol_len)
+vol_ok_c  = volume >= vol_avg_c * i_c_vol_mult
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  SESSIONS — 08:00-11:00 & 14:00-17:00 UTC
+//  SESSIONS — horaires exprimés en heure de Paris (Europe/Paris gère
+//  automatiquement le passage CET/CEST été-hiver)
+//  Asian   : 01:30-08:00 Paris
+//  London  : 08:00-13:00 Paris
+//  NY      : 16:00-19:00 Paris
+//  Détection active dès 08:00 Paris
 // ══════════════════════════════════════════════════════════════════════════════
-in_session = not na(time(timeframe.period, "0800-1100:1234567", "UTC")) or
-             not na(time(timeframe.period, "1400-1700:1234567", "UTC"))
+in_asian   = not na(time(timeframe.period, "0130-0800:1234567", "Europe/Paris"))
+in_ny      = not na(time(timeframe.period, "1600-1900:1234567", "Europe/Paris"))
+in_session = not na(time(timeframe.period, "0800-1300:1234567", "Europe/Paris")) or in_ny
 
+bgcolor(in_asian and i_show_asian ? color.new(color.orange, 94) : na, title="Session Asiatique")
 bgcolor(in_session ? color.new(color.blue, 96) : na, title="Session active")
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  VWAP DAILY + ÉCARTS-TYPES
 // ══════════════════════════════════════════════════════════════════════════════
-new_day = dayofmonth != dayofmonth[1] or bar_index == 0
+// new_day est calculé en UTC (et non le fuseau de l'exchange) pour rester
+// cohérent avec les sessions Asian/London/NY définies plus bas.
+new_day = dayofmonth(time, "UTC") != dayofmonth(time[1], "UTC") or bar_index == 0
 
 var float _pv  = 0.0
 var float _vol = 0.0
@@ -43,9 +88,9 @@ tp_bar = (high + low + close) / 3
 _pv   += tp_bar * volume
 _vol  += volume
 
-vwap  = _vol > 0 ? _pv / _vol : na
+vwap = _vol > 0 ? _pv / _vol : na
 _var += not na(vwap) ? math.pow(tp_bar - vwap, 2) * volume : 0.0
-sd    = _vol > 0 and not na(vwap) ? math.sqrt(_var / _vol) : na
+sd   = _vol > 0 and not na(vwap) ? math.sqrt(_var / _vol) : na
 
 vp1 = not na(sd) ? vwap + sd     : na
 vp2 = not na(sd) ? vwap + sd * 2 : na
@@ -53,9 +98,25 @@ vm1 = not na(sd) ? vwap - sd     : na
 vm2 = not na(sd) ? vwap - sd * 2 : na
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  IDR — 07:00-09:00 UTC (ouverture London)
+//  ASIAN SESSION RANGE — 01:30-08:00 Paris
 // ══════════════════════════════════════════════════════════════════════════════
-in_idr = not na(time(timeframe.period, "0700-0900:1234567", "UTC"))
+var float asian_h = na
+var float asian_l = na
+
+if new_day
+    asian_h := na
+    asian_l := na
+
+if in_asian
+    asian_h := na(asian_h) ? high : math.max(asian_h, high)
+    asian_l := na(asian_l) ? low  : math.min(asian_l, low)
+
+asian_m = na(asian_h) or na(asian_l) ? na : (asian_h + asian_l) / 2
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  IDR — 01:30-11:00 Paris
+// ══════════════════════════════════════════════════════════════════════════════
+in_idr = not na(time(timeframe.period, "0130-1100:1234567", "Europe/Paris"))
 
 var float idr_h = na
 var float idr_l = na
@@ -82,127 +143,286 @@ dr_h := na(dr_h) ? high : math.max(dr_h, high)
 dr_l := na(dr_l) ? low  : math.min(dr_l, low)
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  MACRO TREND — EMA 50 / 200 sur 1h (multi-timeframe, sans lookahead)
+//  VOLUME PROFILE PROXY — filtre logique silencieux
+//  Accumulation par bucket sur range daily H/L
+//  → is_hvn(lvl) / is_lvn(lvl) utilisés dans la détection de signal
+// ══════════════════════════════════════════════════════════════════════════════
+var float[] vp_vol   = array.new_float(0)
+var float   vp_day_h = na
+var float   vp_day_l = na
+
+if new_day
+    array.clear(vp_vol)
+    for _b = 0 to i_vp_buckets - 1
+        array.push(vp_vol, 0.0)
+    vp_day_h := high
+    vp_day_l := low
+
+vp_day_h := na(vp_day_h) ? high : math.max(vp_day_h, high)
+vp_day_l := na(vp_day_l) ? low  : math.min(vp_day_l, low)
+
+if not na(vp_day_h) and not na(vp_day_l) and vp_day_h > vp_day_l and array.size(vp_vol) == i_vp_buckets
+    _bsize = (vp_day_h - vp_day_l) / i_vp_buckets
+    _tp    = (high + low + close) / 3
+    _idx   = math.max(0, math.min(math.floor((_tp - vp_day_l) / _bsize), i_vp_buckets - 1))
+    array.set(vp_vol, _idx, array.get(vp_vol, _idx) + volume)
+
+// Retourne le % volume du bucket correspondant à un niveau de prix
+f_vp_pct(lvl) =>
+    pct = float(50.0)  // valeur neutre par défaut
+    if not na(lvl) and not na(vp_day_h) and not na(vp_day_l) and
+       vp_day_h > vp_day_l and array.size(vp_vol) == i_vp_buckets
+        _bsize  = (vp_day_h - vp_day_l) / i_vp_buckets
+        _idx    = math.max(0, math.min(math.floor((lvl - vp_day_l) / _bsize), i_vp_buckets - 1))
+        _maxvol = array.max(vp_vol)
+        pct    := _maxvol > 0 ? array.get(vp_vol, _idx) / _maxvol * 100 : 50.0
+    pct
+
+// HVN = zone de fort volume → support/résistance validé → signal autorisé
+// LVN = zone de faible volume → le prix traverse vite → signal bloqué
+f_is_hvn(lvl) => f_vp_pct(lvl) >= i_vp_hvn_pct
+f_is_lvn(lvl) => f_vp_pct(lvl) <= i_vp_lvn_pct
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  MACRO TREND — EMA 50 / 200 sur 1h
 // ══════════════════════════════════════════════════════════════════════════════
 ema50_h1  = request.security(syminfo.tickerid, "60", ta.ema(close, 50),  lookahead=barmerge.lookahead_off)
 ema200_h1 = request.security(syminfo.tickerid, "60", ta.ema(close, 200), lookahead=barmerge.lookahead_off)
 
-macro_bull = i_macro ? ema50_h1 >= ema200_h1 and not na(vwap) and close > vwap : true
-macro_bear = i_macro ? ema50_h1 <= ema200_h1 and not na(vwap) and close < vwap : true
+macro_bull_a = i_macro ? ema50_h1 >= ema200_h1 and not na(vwap) and close > vwap : true
+macro_bear_a = i_macro ? ema50_h1 <= ema200_h1 and not na(vwap) and close < vwap : true
+macro_bull_b = not na(vwap) ? close > vwap : true
+macro_bear_b = not na(vwap) ? close < vwap : true
 
-_macro_bg = macro_bull and not macro_bear ? color.new(color.green, 99) : macro_bear and not macro_bull ? color.new(color.red, 99) : na
+_macro_bg = macro_bull_a and not macro_bear_a ? color.new(color.green, 99) : macro_bear_a and not macro_bull_a ? color.new(color.red, 99) : na
 bgcolor(_macro_bg, title="Biais macro")
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  HELPERS — Rejet de bougie sur un niveau
+//  HELPERS — Rejet de bougie
+//  struct_ok : le niveau doit avoir TENU sur les i_struct_bars dernières bougies
+//    • rej_l → aucune clôture précédente SOUS le support (support pas déjà cassé)
+//    • rej_s → aucune clôture précédente AU-DESSUS de la résistance
 // ══════════════════════════════════════════════════════════════════════════════
-// LONG  : mèche basse touche le niveau, close au-dessus, corps haussier ou neutre
 rej_l(lvl) =>
-    not na(lvl) and low <= lvl + atr * 0.5 and close > lvl and close >= open
+    body      = math.max(math.abs(close - open), atr * 0.05)
+    wick_l    = math.min(close, open) - low
+    struct_ok = true
+    for k = 1 to i_struct_bars
+        if close[k] < lvl
+            struct_ok := false
+    body_ok = math.abs(close - open) >= atr * i_body_ratio
+    not na(lvl) and low <= lvl + atr * i_atr_tol and close > lvl and
+     close >= open and wick_l >= body * i_wick_ratio and struct_ok and body_ok
 
-// SHORT : mèche haute touche le niveau, close en-dessous, corps baissier ou neutre
 rej_s(lvl) =>
-    not na(lvl) and high >= lvl - atr * 0.5 and close < lvl and close <= open
+    body      = math.max(math.abs(close - open), atr * 0.05)
+    wick_h    = high - math.max(close, open)
+    struct_ok = true
+    for k = 1 to i_struct_bars
+        if close[k] > lvl
+            struct_ok := false
+    body_ok = math.abs(close - open) >= atr * i_body_ratio
+    not na(lvl) and high >= lvl - atr * i_atr_tol and close < lvl and
+     close <= open and wick_h >= body * i_wick_ratio and struct_ok and body_ok
 
-// Niveau cible le plus proche au-dessus du prix (pour LONG)
+// ══════════════════════════════════════════════════════════════════════════════
+//  HELPERS — Cassure / momentum (Setup C)
+//  Pas d'exigence de mèche de rejet : on veut une clôture nette AU-DELÀ du niveau,
+//  avec un corps large et un volume supérieur à la moyenne. Sert à capter les
+//  impulsions directionnelles franches que rej_l/rej_s ne peuvent pas voir
+//  (le prix ne revient jamais "mordre" le niveau, donc jamais de mèche de rejet).
+//  struct_ok exige une cassure FRAÎCHE : le niveau n'était pas déjà franchi sur
+//  les i_struct_bars bougies précédentes.
+// ══════════════════════════════════════════════════════════════════════════════
+brk_l(lvl) =>
+    struct_ok = true
+    for k = 1 to i_struct_bars
+        if close[k] > lvl
+            struct_ok := false
+    body_ok = math.abs(close - open) >= atr * i_c_body_mult
+    not na(lvl) and close > lvl + atr * i_c_break_atr and close >= open and
+     struct_ok and body_ok and vol_ok_c
+
+brk_s(lvl) =>
+    struct_ok = true
+    for k = 1 to i_struct_bars
+        if close[k] < lvl
+            struct_ok := false
+    body_ok = math.abs(close - open) >= atr * i_c_body_mult
+    not na(lvl) and close < lvl - atr * i_c_break_atr and close <= open and
+     struct_ok and body_ok and vol_ok_c
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  TP TARGETS — 12 niveaux
+// ══════════════════════════════════════════════════════════════════════════════
 f_tp_l(min_d) =>
     b = float(na)
-    for i = 0 to 9
-        lv = i == 0 ? vwap : i == 1 ? vp1   : i == 2 ? vp2  : i == 3 ? vm1 : i == 4 ? vm2 :
-             i == 5 ? idr_h : i == 6 ? idr_l : i == 7 ? idr_m : i == 8 ? dr_h : dr_l
+    for i = 0 to 11
+        lv = i == 0 ? vwap   : i == 1 ? vp1    : i == 2 ? vp2   : i == 3 ? vm1    :
+             i == 4 ? vm2    : i == 5 ? idr_h  : i == 6 ? idr_l : i == 7 ? idr_m  :
+             i == 8 ? dr_h   : i == 9 ? dr_l   : i == 10 ? asian_h : asian_l
         if not na(lv) and lv > close + min_d
             b := na(b) or lv < b ? lv : b
     b
 
-// Niveau cible le plus proche en-dessous du prix (pour SHORT)
 f_tp_s(min_d) =>
     b = float(na)
-    for i = 0 to 9
-        lv = i == 0 ? vwap : i == 1 ? vp1   : i == 2 ? vp2  : i == 3 ? vm1 : i == 4 ? vm2 :
-             i == 5 ? idr_h : i == 6 ? idr_l : i == 7 ? idr_m : i == 8 ? dr_h : dr_l
+    for i = 0 to 11
+        lv = i == 0 ? vwap   : i == 1 ? vp1    : i == 2 ? vp2   : i == 3 ? vm1    :
+             i == 4 ? vm2    : i == 5 ? idr_h  : i == 6 ? idr_l : i == 7 ? idr_m  :
+             i == 8 ? dr_h   : i == 9 ? dr_l   : i == 10 ? asian_h : asian_l
         if not na(lv) and lv < close - min_d
             b := na(b) or lv > b ? lv : b
     b
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  DÉTECTION DE SIGNAL
+//  DÉTECTION DE SIGNAL — 13 niveaux
+//  Logique VP intégrée :
+//    • niveau en LVN  → signal bloqué (prix traverserait sans réaction)
+//    • niveau en HVN  → RR minimum abaissé de i_vp_rr_bonus (signal plus facile)
+//    • niveau neutre  → comportement standard
 // ══════════════════════════════════════════════════════════════════════════════
-hist_h = ta.highest(close, 25)   // plus haut close sur 25 bougies (Setup A)
-hist_l = ta.lowest(close,  25)   // plus bas  close sur 25 bougies (Setup A)
+hist_h = ta.highest(close, i_lookback)
+hist_l = ta.lowest(close,  i_lookback)
 
-// Pre-calcul des cibles TP (une seule fois, hors boucle de niveaux)
 tp_al = f_tp_l(atr * 0.8)
 tp_bl = f_tp_l(atr * 1.0)
 tp_as = f_tp_s(atr * 0.8)
 tp_bs = f_tp_s(atr * 1.0)
+tp_cl = f_tp_l(atr * 1.2)
+tp_cs = f_tp_s(atr * 1.2)
 
-sig_long  = false
-sig_short = false
-sig_tp    = float(na)
-sig_sl    = float(na)
-sig_rr    = float(0.0)
-sig_text  = ""
+sig_long   = false
+sig_short  = false
+sig_tp     = float(na)
+sig_sl     = float(na)
+sig_rr     = float(0.0)
+sig_text   = ""
+sig_hvn    = false  // pour marquer visuellement les signaux sur HVN
+sig_setupc = false  // pour marquer visuellement les signaux de breakout (Setup C)
 
-if in_session
-    for i = 0 to 9
-        lvl = i == 0 ? vwap : i == 1 ? vp1   : i == 2 ? vp2  : i == 3 ? vm1 : i == 4 ? vm2 :
-              i == 5 ? idr_h : i == 6 ? idr_l : i == 7 ? idr_m : i == 8 ? dr_h : dr_l
-        lnm = i == 0 ? "VWAP"    : i == 1 ? "VWAP+1σ" : i == 2 ? "VWAP+2σ" :
-              i == 3 ? "VWAP-1σ" : i == 4 ? "VWAP-2σ" : i == 5 ? "IDR_H"   :
-              i == 6 ? "IDR_L"   : i == 7 ? "IDR_M"   : i == 8 ? "DR_H"    : "DR_L"
+if in_session and not_in_range
+    for i = 0 to 12
+        lvl = i == 0  ? vwap    : i == 1  ? vp1     : i == 2  ? vp2    :
+              i == 3  ? vm1     : i == 4  ? vm2     : i == 5  ? idr_h  :
+              i == 6  ? idr_l   : i == 7  ? idr_m   : i == 8  ? dr_h   :
+              i == 9  ? dr_l    : i == 10 ? asian_h  : i == 11 ? asian_l : asian_m
+        lnm = i == 0  ? "VWAP"    : i == 1  ? "VWAP+1σ" : i == 2  ? "VWAP+2σ" :
+              i == 3  ? "VWAP-1σ" : i == 4  ? "VWAP-2σ" : i == 5  ? "IDR_H"   :
+              i == 6  ? "IDR_L"   : i == 7  ? "IDR_M"   : i == 8  ? "DR_H"    :
+              i == 9  ? "DR_L"    : i == 10 ? "Asian_H"  : i == 11 ? "Asian_L"  : "Asian_M"
 
         if not na(lvl) and not sig_long and not sig_short
-            // ── Setup A Long ── post-breakout retest haussier ─────────────
+
+            // Qualification VP du niveau
+            _lvn  = f_is_lvn(lvl)
+            _hvn  = f_is_hvn(lvl)
+            // Bonus RR si HVN (signal plus fiable), malus si LVN (bloqué)
+            _rr_bonus = _hvn ? i_vp_rr_bonus : 0.0
+            _vp_tag   = _hvn ? " ★HVN" : ""
+
+            // ── Setup A Long ──────────────────────────────────────────────
             sl_al = lvl - atr * 0.5
             rr_al = not na(tp_al) ? (tp_al - close) / math.max(close - sl_al, 1e-9) : 0.0
-            if macro_bull and rej_l(lvl) and
-               hist_h > lvl + atr * 0.8 and
-               close <= lvl + atr * 1.2 and
-               not na(tp_al) and rr_al >= i_rr_a
+            if not _lvn and macro_bull_a and rej_l(lvl) and
+               hist_h > lvl + atr * 0.5 and close <= lvl + atr * 1.2 and
+               not na(tp_al) and rr_al >= i_rr_a - _rr_bonus
                 sig_long := true
                 sig_tp   := tp_al
                 sig_sl   := sl_al
                 sig_rr   := rr_al
-                sig_text := "Setup A ↑  " + lnm
+                sig_text := "Setup A ↑  " + lnm + _vp_tag
+                sig_hvn  := _hvn
 
-            // ── Setup A Short ── post-breakout retest baissier ────────────
+            // ── Setup A Short ─────────────────────────────────────────────
             if not sig_long and not sig_short
                 sl_as = lvl + atr * 0.5
                 rr_as = not na(tp_as) ? (close - tp_as) / math.max(sl_as - close, 1e-9) : 0.0
-                if macro_bear and rej_s(lvl) and
-                   hist_l < lvl - atr * 0.8 and
-                   close >= lvl - atr * 1.2 and
-                   not na(tp_as) and rr_as >= i_rr_a
+                if not _lvn and macro_bear_a and rej_s(lvl) and
+                   hist_l < lvl - atr * 0.5 and close >= lvl - atr * 1.2 and
+                   not na(tp_as) and rr_as >= i_rr_a - _rr_bonus
                     sig_short := true
                     sig_tp    := tp_as
                     sig_sl    := sl_as
                     sig_rr    := rr_as
-                    sig_text  := "Setup A ↓  " + lnm
+                    sig_text  := "Setup A ↓  " + lnm + _vp_tag
+                    sig_hvn   := _hvn
 
-            // ── Setup B Long ── rejet sur support → target opposé ─────────
+            // ── Setup B Long ──────────────────────────────────────────────
             if not sig_long and not sig_short
-                sl_bl = lvl - atr * 0.5
-                rr_bl = not na(tp_bl) ? (tp_bl - close) / math.max(close - sl_bl, 1e-9) : 0.0
-                if macro_bull and rej_l(lvl) and not na(tp_bl) and rr_bl >= i_rr_b
+                sl_bl          = lvl - atr * 0.5
+                rr_bl          = not na(tp_bl) ? (tp_bl - close) / math.max(close - sl_bl, 1e-9) : 0.0
+                is_extreme_sup = lvl == vm2 or lvl == dr_l or lvl == idr_l or lvl == asian_l
+                macro_ok_bl    = is_extreme_sup ? true : macro_bull_b
+                if not _lvn and macro_ok_bl and rej_l(lvl) and
+                   not na(tp_bl) and rr_bl >= i_rr_b - _rr_bonus
                     sig_long := true
                     sig_tp   := tp_bl
                     sig_sl   := sl_bl
                     sig_rr   := rr_bl
-                    sig_text := "Setup B ↑  " + lnm
+                    sig_text := "Setup B ↑  " + lnm + _vp_tag
+                    sig_hvn  := _hvn
 
-            // ── Setup B Short ── rejet sur résistance → target opposé ─────
+            // ── Setup B Short ─────────────────────────────────────────────
             if not sig_long and not sig_short
-                sl_bs = lvl + atr * 0.5
-                rr_bs = not na(tp_bs) ? (close - tp_bs) / math.max(sl_bs - close, 1e-9) : 0.0
-                if macro_bear and rej_s(lvl) and not na(tp_bs) and rr_bs >= i_rr_b
+                sl_bs          = lvl + atr * 0.5
+                rr_bs          = not na(tp_bs) ? (close - tp_bs) / math.max(sl_bs - close, 1e-9) : 0.0
+                is_extreme_res = lvl == vp2 or lvl == dr_h or lvl == idr_h or lvl == asian_h
+                macro_ok_bs    = is_extreme_res ? true : macro_bear_b
+                if not _lvn and macro_ok_bs and rej_s(lvl) and
+                   not na(tp_bs) and rr_bs >= i_rr_b - _rr_bonus
                     sig_short := true
                     sig_tp    := tp_bs
                     sig_sl    := sl_bs
                     sig_rr    := rr_bs
-                    sig_text  := "Setup B ↓  " + lnm
+                    sig_text  := "Setup B ↓  " + lnm + _vp_tag
+                    sig_hvn   := _hvn
+
+            // ── Setup C Long ── cassure haussière nette, sans mèche de rejet ─
+            // Pas de filtre VP ici : une cassure passe justement plus facilement
+            // par les zones LVN, ça ne doit pas la bloquer.
+            // Filtre macro allégé (VWAP seul, pas d'EMA H1) : Setup C sert
+            // justement à capter les retournements francs, où l'EMA H1 est
+            // structurellement en retard sur le mouvement qui vient de se produire.
+            if i_c_enable and not sig_long and not sig_short
+                sl_cl = lvl - atr * 0.5
+                rr_cl = not na(tp_cl) ? (tp_cl - close) / math.max(close - sl_cl, 1e-9) : 0.0
+                if macro_bull_b and brk_l(lvl) and not na(tp_cl) and rr_cl >= i_rr_c
+                    sig_long   := true
+                    sig_tp     := tp_cl
+                    sig_sl     := sl_cl
+                    sig_rr     := rr_cl
+                    sig_text   := "Setup C ↑  " + lnm
+                    sig_setupc := true
+
+            // ── Setup C Short ── cassure baissière nette, sans mèche de rejet ─
+            if i_c_enable and not sig_long and not sig_short
+                sl_cs = lvl + atr * 0.5
+                rr_cs = not na(tp_cs) ? (close - tp_cs) / math.max(sl_cs - close, 1e-9) : 0.0
+                if macro_bear_b and brk_s(lvl) and not na(tp_cs) and rr_cs >= i_rr_c
+                    sig_short  := true
+                    sig_tp     := tp_cs
+                    sig_sl     := sl_cs
+                    sig_rr     := rr_cs
+                    sig_text   := "Setup C ↓  " + lnm
+                    sig_setupc := true
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  TRACÉ DES NIVEAUX CLÉS
+//  CONFIRMATION SUR CLÔTURE (anti-repaint) + COOLDOWN
+// ══════════════════════════════════════════════════════════════════════════════
+var int last_signal_bar = na
+
+bars_since  = na(last_signal_bar) ? 1000000 : bar_index - last_signal_bar
+cooldown_ok = bars_since >= i_cooldown
+
+confirmed_long  = sig_long  and barstate.isconfirmed and cooldown_ok
+confirmed_short = sig_short and barstate.isconfirmed and cooldown_ok
+
+if confirmed_long or confirmed_short
+    last_signal_bar := bar_index
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  TRACÉ DES NIVEAUX
 // ══════════════════════════════════════════════════════════════════════════════
 plot(vwap, "VWAP", color=color.new(color.white, 10), linewidth=2)
 
@@ -221,33 +441,49 @@ plot(i_show_idr ? idr_m : na, "IDR Mid",  color=color.new(color.yellow, 55), sty
 plot(i_show_idr ? dr_h  : na, "DR High",  color=color.new(color.orange, 40), style=plot.style_stepline, linewidth=1)
 plot(i_show_idr ? dr_l  : na, "DR Low",   color=color.new(color.orange, 40), style=plot.style_stepline, linewidth=1)
 
+plot(i_show_asian ? asian_h : na, "Asian High", color=color.new(color.fuchsia, 20), style=plot.style_stepline, linewidth=1)
+plot(i_show_asian ? asian_l : na, "Asian Low",  color=color.new(color.fuchsia, 20), style=plot.style_stepline, linewidth=1)
+plot(i_show_asian ? asian_m : na, "Asian Mid",  color=color.new(color.fuchsia, 55), style=plot.style_stepline, linewidth=1)
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  SIGNAUX — FLÈCHES + LABELS
+//  Signaux sur HVN : flèche plus grande pour les distinguer
 // ══════════════════════════════════════════════════════════════════════════════
-plotshape(sig_long,  "LONG",  shape.triangleup,   location.belowbar,
-          color.new(color.lime, 0), size=size.normal)
-plotshape(sig_short, "SHORT", shape.triangledown, location.abovebar,
-          color.new(color.red,  0), size=size.normal)
+plotshape(confirmed_long  and not sig_hvn and not sig_setupc, "LONG",      shape.triangleup,   location.belowbar, color.new(color.lime,  0), size=size.normal)
+plotshape(confirmed_long  and sig_hvn,                        "LONG ★HVN", shape.triangleup,   location.belowbar, color.new(color.lime,  0), size=size.large)
+plotshape(confirmed_long  and sig_setupc,                     "LONG ▶C",   shape.diamond,       location.belowbar, color.new(color.aqua,  0), size=size.normal)
+plotshape(confirmed_short and not sig_hvn and not sig_setupc, "SHORT",     shape.triangledown, location.abovebar, color.new(color.red,   0), size=size.normal)
+plotshape(confirmed_short and sig_hvn,                        "SHORT ★HVN",shape.triangledown, location.abovebar, color.new(color.red,   0), size=size.large)
+plotshape(confirmed_short and sig_setupc,                     "SHORT ▶C",  shape.diamond,       location.abovebar, color.new(color.orange,0), size=size.normal)
 
-if i_show_label and barstate.isconfirmed
-    if sig_long
+if i_show_label
+    if confirmed_long
         label.new(bar_index, low - atr * 1.5,
                   text      = sig_text +
                               "\nTP  " + str.tostring(sig_tp, "#.##") +
                               "\nSL  " + str.tostring(sig_sl, "#.##") +
                               "\nRR  " + str.tostring(sig_rr, "#.#") + "x",
                   style     = label.style_label_up,
-                  color     = color.new(color.lime, 5),
+                  color     = sig_setupc ? color.new(color.aqua, 5) : sig_hvn ? color.new(color.lime, 0) : color.new(color.lime, 5),
                   textcolor = color.black,
                   size      = size.small)
-
-    if sig_short
+    if confirmed_short
         label.new(bar_index, high + atr * 1.5,
                   text      = sig_text +
                               "\nTP  " + str.tostring(sig_tp, "#.##") +
                               "\nSL  " + str.tostring(sig_sl, "#.##") +
                               "\nRR  " + str.tostring(sig_rr, "#.#") + "x",
                   style     = label.style_label_down,
-                  color     = color.new(color.red, 5),
+                  color     = sig_setupc ? color.new(color.orange, 5) : sig_hvn ? color.new(color.red, 0) : color.new(color.red, 5),
                   textcolor = color.white,
                   size      = size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  ALERTES
+// ══════════════════════════════════════════════════════════════════════════════
+alertcondition(confirmed_long,               title="VWAP — Signal LONG",      message="LONG {{ticker}} @ {{close}}")
+alertcondition(confirmed_short,              title="VWAP — Signal SHORT",     message="SHORT {{ticker}} @ {{close}}")
+alertcondition(confirmed_long  and sig_hvn,  title="VWAP — LONG ★ HVN",      message="LONG HVN {{ticker}} @ {{close}}")
+alertcondition(confirmed_short and sig_hvn,  title="VWAP — SHORT ★ HVN",     message="SHORT HVN {{ticker}} @ {{close}}")
+alertcondition(confirmed_long  and sig_setupc, title="VWAP — LONG ▶ Breakout (C)",  message="LONG BREAKOUT {{ticker}} @ {{close}}")
+alertcondition(confirmed_short and sig_setupc, title="VWAP — SHORT ▶ Breakout (C)", message="SHORT BREAKOUT {{ticker}} @ {{close}}")
